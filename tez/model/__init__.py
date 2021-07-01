@@ -1,1 +1,1 @@
-from .model import Trainer
+from .model import Model
