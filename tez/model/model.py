@@ -45,9 +45,12 @@ def mixup_data(inputs, targets, alpha=1.0):
 def mixup_criterion(criterion, outputs, targets_a, targets_b, lam):
     return lam * criterion(outputs, targets_a) + (1 - lam) * criterion(outputs, targets_b)
 
-class Trainer():
-    def __init__(self, *args, **kwrds):
-        self.model = None
+class Model(nn.Module):
+    def __init__(self, *args, **kwargs):
+        """
+        Instead of inheriting from nn.Module, you import tez and inherit from tez.Model
+        """
+        super().__init__(*args, **kwargs)
         self.valid_targets = None
         self.train_loader = None
         self.valid_loader = None
@@ -77,6 +80,7 @@ class Trainer():
     @model_state.setter
     def model_state(self, value):
         self._model_state = value
+        # run something here in future if needed
 
     @property
     def train_state(self):
@@ -95,10 +99,9 @@ class Trainer():
         v_2 = "_".join(metric_name.split("_")[1:])
         return self.metrics[v_1][v_2]
 
-    def _init_trainer(
+    def _init_model(
         self,
         device,
-        model,
         train_dataset,
         valid_dataset,
         valid_targets,
@@ -116,7 +119,7 @@ class Trainer():
     ):
 
         torch.backends.cudnn.deterministic = determinstic
-        torch.backends.cudnn.benchmark = benchmark
+        torch.backends.cudnn.benchmark = benchmark 
 
         if callbacks is None:
             callbacks = list()
@@ -129,8 +132,8 @@ class Trainer():
         if self.valid_targets is None:
             self.valid_targets = valid_targets
 
-        if next(self.model.parameters()).device != self.device:
-            self.model.to(self.device)
+        if next(self.parameters()).device != self.device:
+            self.to(self.device)
 
         if self.train_loader is None:
             self.train_loader = torch.utils.data.DataLoader(
@@ -182,7 +185,7 @@ class Trainer():
             project= cfg.project_name,
             name=cfg.wandb_exp_name,
         )
-        wandb.watch(self.model)
+        wandb.watch(self)
 
     def epoch_metrics(self, *args, **kwargs):
         return
@@ -199,23 +202,44 @@ class Trainer():
     def configure_scheduler(self, *args, **kwargs):
         return
 
-    def train_one_step(self, inputs, targets):
-        inputs = inputs.to(self.device, non_blocking=True)
-        targets = targets.to(self.device, non_blocking=True)
+    def forward(self, *args, **kwargs):
+        return super().forward(*args, **kwargs)
+
+    def model_fn(self, data):
+        # DataLoaderから受け取ったものをGPUに返し, 
+        #forwardから値を取り出す
+        for key, value in data.items():
+            data[key] = value.to(self.device, non_blocking=True)
+        if self.fp16:
+            with torch.cuda.amp.autocast():
+                # 辞書をunpackしてキーワードargumentとして渡す
+                # {'image': 1, 'labels' : 2}であれば
+                # forward関数には対応するkeywardが必要
+                output, loss, metrics = self(**data)
+        else:
+            output, loss, metrics = self(**data)
+        return output, loss, metrics
+
+    def model_fn_mixup(self, data):
+        for key, value in data.items():
+            data[key] = value.to(self.device, non_blocking=True)
+        if self.fp16:
+            with torch.cuda.amp.autocast():
+                output, loss, metrics = self(**data)
+        else:
+            output, loss, metrics = self(**data)
+        return output, loss, metrics
+
+    def train_one_step(self, data):
         self.optimizer.zero_grad()
+        _, loss, metrics = self.model_fn(data)
         with torch.set_grad_enabled(True):
             if self.fp16:
                 with torch.cuda.amp.autocast():
-                    outputs = self.model(inputs)
-                    loss = self.criterion(outputs, targets.view(-1, 1))
-                    metrics = self.monitor_metrics(outputs, targets)
-                self.scaler.scale(loss).backward()
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
+                    self.scaler.scale(loss).backward()
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
             else:
-                outputs = self.model(inputs)
-                loss = self.criterion(outputs, targets.view(-1, 1))
-                metrics = self.monitor_metrics(outputs, targets)
                 loss.backward()
                 self.optimizer.step()
             if self.scheduler:
@@ -225,40 +249,29 @@ class Trainer():
                     else:
                         step_metric = self.name_to_metric(self.step_scheduler_metric)
                         self.scheduler.step(step_metric)
-        return outputs, loss, metrics
+        return loss, metrics
 
+    def validate_one_step(self, data):
+        output, loss, metrics = self.model_fn(data)
+        return output, loss, metrics
 
-    def validate_one_step(self, inputs, targets = None):
-        inputs = inputs.to(self.device, non_blocking=True)
-        if targets is not None:
-            targets = targets.to(self.device, non_blocking=True)
-            with torch.no_grad():
-                outputs = self.model(inputs)
-                loss = self.criterion(outputs, targets.view(-1, 1))
-                metrics = self.monitor_metrics(outputs, targets)
-            return outputs, loss, metrics
-        else:
-            outputs = self.model(inputs)
-            return outputs, None, None
-
-    def predict_one_step(self, inputs):
-        outputs, _, _ = self.validate_one_step(inputs)
-        return outputs
+    def predict_one_step(self, data):
+        output, _, _ = self.model_fn(data)
+        return output
 
     def update_metrics(self, losses, monitor):
         self.metrics[self._model_state.value].update(monitor)
         self.metrics[self._model_state.value]["loss"] = losses.avg
 
     def train_one_epoch(self, data_loader):
-        self.model.train()
+        self.train()
         self.model_state = enums.ModelState.TRAIN
         losses = AverageMeter()
         tk0 = tqdm(data_loader, total=len(data_loader), position = 0, leave = True)
-
-        for b_idx, (inputs, targets) in enumerate(tk0):
+        for b_idx, data in enumerate(tk0):
             self.train_state = enums.TrainingState.TRAIN_STEP_START
             
-            _, loss, metrics = self.train_one_step(inputs, targets)
+            loss, metrics = self.train_one_step(data)
             
             self.train_state = enums.TrainingState.TRAIN_STEP_END
             losses.update(loss.item(), data_loader.batch_size)
@@ -284,15 +297,15 @@ class Trainer():
         return losses.avg
 
     def validate_one_epoch(self, data_loader):
-        self.model.eval()
+        self.eval()
         self.model_state = enums.ModelState.VALID
         losses = AverageMeter()
         preds_list = []
         tk0 = tqdm(data_loader, total=len(data_loader))
-        for b_idx, (inputs, targets) in enumerate(tk0):
+        for b_idx, data in enumerate(tk0):
             self.train_state = enums.TrainingState.VALID_STEP_START
             with torch.no_grad():
-                output, loss, metrics = self.validate_one_step(inputs, targets)
+                output, loss, metrics = self.validate_one_step(data)
                 preds_list.append(output.cpu().detach().numpy())
             self.train_state = enums.TrainingState.VALID_STEP_END
             losses.update(loss.item(), data_loader.batch_size)
@@ -322,8 +335,8 @@ class Trainer():
         return output
 
     def predict(self, dataset, sampler=None, batch_size=16, n_jobs=1, collate_fn=None):
-        if next(self.model.parameters()).device != self.device:
-            self.model.to(self.device)
+        if next(self.parameters()).device != self.device:
+            self.to(self.device)
 
         if n_jobs == -1:
             n_jobs = psutil.cpu_count()
@@ -335,16 +348,16 @@ class Trainer():
         )
 
         if self.training:
-            self.model.eval()
+            self.eval()
 
         preds_list = []
         tk0 = tqdm(data_loader, total=len(data_loader))
 
-        for b_idx, inputs in enumerate(tk0):
+        for b_idx, data in enumerate(tk0):
             with torch.no_grad():
-                preds_one_batch = self.predict_one_step(inputs)
+                preds_one_batch = self.predict_one_step(data)
                 preds_list.append(preds_one_batch.cpu().detach().numpy())
-            tk0.set_postfix(stage="inference")
+            tk0.set_postfix(stage="test")
         tk0.close()
         preds_arr = np.concatenate(preds_list)
         return preds_arr
@@ -369,8 +382,8 @@ class Trainer():
 
     def load(self, model_path, device="cuda:0"):
         self.device = device
-        if next(self.model.parameters()).device != self.device:
-            self.model.to(self.device)
+        if next(self.parameters()).device != self.device:
+            self.to(self.device)
         model_dict = torch.load(model_path, map_location=torch.device(device))
         self.load_state_dict(model_dict["state_dict"])
 
@@ -394,9 +407,13 @@ class Trainer():
         train_collate_fn=None,
         valid_collate_fn=None,
     ):
-
+        """
+        The model fit function. Heavily inspired by tf/keras, this function is the core of Tez and this is the only
+        function you need to train your models.
+        
+        """
         set_seed(cfg.seed)
-        self._init_trainer(
+        self._init_model(
             device=device,
             train_dataset=train_dataset,
             valid_dataset=valid_dataset,
