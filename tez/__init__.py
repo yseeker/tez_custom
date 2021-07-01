@@ -1,2 +1,2 @@
-from .model import Trainer
+from .model import Model
 from .callbacks import Callback
