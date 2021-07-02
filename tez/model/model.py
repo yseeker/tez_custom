@@ -325,6 +325,7 @@ class Model(nn.Module):
             wandb.log(wandb_log)
             self.current_valid_step += 1
         preds_arr = np.concatenate(preds_list)
+        print(preds_arr)
         valid_metric_val = self.epoch_metrics(preds_arr, self.valid_targets)
         tk0.close()
         self.update_metrics(losses=losses, monitor=monitor)
