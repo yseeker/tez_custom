@@ -72,6 +72,7 @@ class Model(nn.Module):
         self.metrics["train"] = {}
         self.metrics["valid"] = {}
         self.metrics["test"] = {}
+        self.wandb = False
 
     @property
     def model_state(self):
@@ -284,13 +285,14 @@ class Model(nn.Module):
                     monitor[m_m] = metrics_meter[m_m].avg
             self.current_train_step += 1
             current_lr = self.optimizer.param_groups[0]['lr']
-            wandb_log = {
-                "train/step" : b_idx,
-                "train/loss_step": losses.avg,
-                "lr": current_lr 
-                }
-            wandb_log.update(monitor)
-            wandb.log(wandb_log)
+            if self.wandb:
+                wandb_log = {
+                    "train/step" : b_idx,
+                    "train/loss_step": losses.avg,
+                    "lr": current_lr 
+                    }
+                wandb_log.update(monitor)
+                wandb.log(wandb_log)
             tk0.set_postfix(loss=losses.avg, stage="train", **monitor, lr = current_lr)
         tk0.close()
         self.update_metrics(losses=losses, monitor=monitor)
@@ -317,12 +319,13 @@ class Model(nn.Module):
                     metrics_meter[m_m].update(metrics[m_m], data_loader.batch_size)
                     monitor[m_m] = metrics_meter[m_m].avg
             tk0.set_postfix(loss=losses.avg, stage="valid", **monitor)
-            wandb_log = {
-                "valid/step" : b_idx,
-                "valid/loss_step": losses.avg,
-                }
-            wandb_log.update(monitor)
-            wandb.log(wandb_log)
+            if self.wandb:
+                wandb_log = {
+                    "valid/step" : b_idx,
+                    "valid/loss_step": losses.avg,
+                    }
+                wandb_log.update(monitor)
+                wandb.log(wandb_log)
             self.current_valid_step += 1
         preds_arr = np.concatenate(preds_list)
         valid_metric_val = self.epoch_metrics(preds_arr, self.valid_targets)
@@ -430,7 +433,7 @@ class Model(nn.Module):
             determinstic = determinstic,
             benchmark = benchmark,
         )
-        self._init_wandb(cfg)
+        if self.wandb: self._init_wandb(cfg)
 
         for epoch in range(epochs):
             self.train_state = enums.TrainingState.EPOCH_START
@@ -450,16 +453,17 @@ class Model(nn.Module):
                         self.scheduler.step(step_metric)
             self.train_state = enums.TrainingState.EPOCH_END
             print(f'epoch: {epoch}, epoch_valid_metrics : {valid_metrics}')
-            wandb.log({
-                "epoch" : epoch,
-                "train/loss" : train_loss,
-                "valid/loss" : valid_loss,
-                "valid/metric" : valid_metrics,
-                })
+            if self.wandb:
+                wandb.log({
+                    "epoch" : epoch,
+                    "train/loss" : train_loss,
+                    "valid/loss" : valid_loss,
+                    "valid/metric" : valid_metrics,
+                    })
             if self._model_state.value == "end":
                 break
             self.current_epoch += 1
         self.train_state = enums.TrainingState.TRAIN_END
-        wandb.finish()
+        if self.wandb: wandb.finish()
         torch.cuda.empty_cache()
         gc.collect()
